@@ -142,7 +142,7 @@
 		camera {
 			compatible = "exynos8890-ion,camera";
 			ion,recyclable;
-			size = <461373440>;
+			size = <566231040>;
 			alloc-ranges = <0 1073741824 3221225472>;
 			alignment = <0 4194304>;
 			id = <10>;
