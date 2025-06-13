@@ -241,4 +241,7 @@ source "drivers/gator_5.27/Kconfig"
 source "drivers/mpsd/Kconfig"
 
 source "drivers/kernelsu/Kconfig"
+
+source "drivers/extremerom/Kconfig"
+
 endmenu
