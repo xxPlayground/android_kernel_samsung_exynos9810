@@ -105,8 +105,9 @@ void tracing_mark_write(struct decon_device *decon, char id, char *str1, int val
 		decon_err("%s:argument fail\n", __func__);
 		return;
 	}
+#if 0
 	trace_puts(buf);
-
+#endif
 }
 
 static void decon_dump_using_dpp(struct decon_device *decon)
@@ -3962,9 +3963,11 @@ static int decon_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_pinctrl;
 
+#ifdef CONFIG_DECON_EVENT_LOG
 	ret = decon_create_debugfs(decon);
 	if (ret)
 		goto err_pinctrl;
+#endif
 
 #ifdef CONFIG_DECON_HIBER
 	ret = decon_register_hiber_work(decon);
@@ -4069,9 +4072,11 @@ static int decon_remove(struct platform_device *pdev)
 	for (i = 0; i < decon->dt.max_win; i++)
 		decon_release_windows(decon->win[i]);
 
+#ifdef CONFIG_DECON_EVENT_LOG
 	debugfs_remove_recursive(decon->d.debug_root);
 	if (decon->d.event_log)
 		kfree(decon->d.event_log);
+#endif
 
 	decon_info("remove sucessful\n");
 	return 0;
