@@ -111,37 +111,45 @@ static int edid_read_block(struct displayport_device *hdev, int block, u8 *buf, 
 	return 0;
 }
 
-int edid_read(struct displayport_device *hdev)
+int edid_read(struct displayport_device *hdev, u8 **data)
 {
+	u8 block0[EDID_BLOCK_SIZE];
+	u8 *edid;
 	int block = 0;
 	int block_cnt, ret;
-	u8 *edid_buf = hdev->rx_edid_data.edid_buf;
 
-	ret = edid_read_block(hdev, 0, edid_buf, EDID_BLOCK_SIZE);
+	ret = edid_read_block(hdev, 0, block0, sizeof(block0));
 	if (ret)
 		return ret;
 
-	ret = edid_checksum(edid_buf, block);
+	ret = edid_checksum(block0, block);
 	if (ret)
 		return ret;
 
-	block_cnt = edid_buf[EDID_EXTENSION_FLAG] + 1;
+	block_cnt = block0[EDID_EXTENSION_FLAG] + 1;
 	displayport_info("block_cnt = %d\n", block_cnt);
 
-	while (++block < block_cnt) {
-		u8 *edid_ext = edid_buf + (block * EDID_BLOCK_SIZE);
+	edid = kmalloc(block_cnt * EDID_BLOCK_SIZE, GFP_KERNEL);
+	if (!edid)
+		return -ENOMEM;
 
+	memcpy(edid, block0, sizeof(block0));
+
+	while (++block < block_cnt) {
 		ret = edid_read_block(hdev, block,
-			edid_ext,
+			edid + (block * EDID_BLOCK_SIZE),
 			EDID_BLOCK_SIZE);
 
 		/* check error, extension tag and checksum */
-		if (ret || *edid_ext != 0x02 ||
-				edid_checksum(edid_ext, block)) {
+		if (ret || *(edid + (block * EDID_BLOCK_SIZE)) != 0x02 ||
+				edid_checksum(edid + (block * EDID_BLOCK_SIZE), block)) {
 			displayport_info("block_cnt:%d/%d, ret: %d\n", block, block_cnt, ret);
+			*data = edid;
 			return block;
 		}
 	}
+
+	*data = edid;
 
 	return block_cnt;
 }
@@ -808,7 +816,7 @@ int edid_update(struct displayport_device *hdev)
 	struct fb_monspecs specs;
 	struct fb_vendor vsdb;
 	struct fb_audio sad;
-	u8 *edid = hdev->rx_edid_data.edid_buf;
+	u8 *edid = NULL;
 	int block_cnt = 0;
 	int i;
 	int basic_audio = 0;
@@ -836,33 +844,19 @@ int edid_update(struct displayport_device *hdev)
 	for (i = 1; i < supported_videos_pre_cnt; i++)
 		supported_videos[i].edid_support_match = false;
 
-	/*
-	 * exynos9810: harden EDID reconnect parsing.
-	 *
-	 * HPD reconnect can reach edid_update() before the optional test EDID
-	 * buffer is assigned. Do not dereference hdev->edid_test_buf unless it is
-	 * present. Also keep the local EDID pointer synced after edid_read().
-	 */
 	if (hdev->do_unit_test)
 		block_cnt = edid_read_unit(&edid);
-	else if (hdev->edid_test_buf &&
-			(hdev->edid_test_buf[0] == 1 || hdev->edid_test_buf[0] == 2)) {
+	else if (hdev->edid_test_buf[0] == 1 || hdev->edid_test_buf[0] == 2) {
 		edid_test = 1;
 		edid = &hdev->edid_test_buf[1];
 		block_cnt = hdev->edid_test_buf[0];
 		displayport_info("using test edid %d\n", block_cnt);
 	} else
-		block_cnt = edid_read(hdev);
-
-	if (!hdev->do_unit_test && !edid_test)
-		edid = hdev->rx_edid_data.edid_buf;
-
-	if (block_cnt < 0 || !edid) {
+		block_cnt = edid_read(hdev, &edid);
+	if (block_cnt < 0) {
 		hdev->bpc = BPC_6;
 		goto out;
 	}
-
-	hdev->rx_edid_data.edid_data_size = EDID_BLOCK_SIZE * block_cnt;
 
 #ifdef CONFIG_SEC_DISPLAYPORT_BIGDATA
 	secdp_bigdata_save_item(BD_EDID, edid);
@@ -942,53 +936,10 @@ int edid_update(struct displayport_device *hdev)
 
 out:
 #ifdef FEATURE_SUPPORT_DISPLAYID
-	if (edid)
-		edid_add_displayid_detailed_modes(edid);
+	edid_add_displayid_detailed_modes(edid);
 #endif
 
-	if (edid)
-		edid_check_detail_timing_desc1(&specs, modedb_len, edid);
-
-	/*
-	 * exynos9810: drop DEX_NOT_SUPPORT EDID modes.
-	 *
-	 * On reconnect the DP state can sometimes reach edid_update() without the
-	 * Samsung DeX resolution policy active. Then 4K modes from the sink EDID
-	 * can become best_video/default even though the table marks them as
-	 * DEX_NOT_SUPPORT. That path has been observed selecting V3840X2160P30
-	 * immediately before unrelated-looking interrupt/memory fallout.
-	 *
-	 * Keep FHD/WQHD-capable modes, including detailed VDUMMYTIMING modes, but
-	 * never expose unsupported 4K/unsafe modes on this branch.
-	 */
-	for (i = 0; i < supported_videos_pre_cnt; i++) {
-		if (supported_videos[i].edid_support_match &&
-				supported_videos[i].dex_support == DEX_NOT_SUPPORT) {
-			displayport_info("EDID: drop unsupported video_format %s\n",
-					supported_videos[i].name);
-			supported_videos[i].edid_support_match = false;
-		}
-	}
-
-	if (hdev->best_video < supported_videos_pre_cnt &&
-			supported_videos[hdev->best_video].dex_support == DEX_NOT_SUPPORT) {
-		int best_video = -1;
-
-		for (i = 0; i < supported_videos_pre_cnt; i++) {
-			if (supported_videos[i].edid_support_match &&
-					supported_videos[i].dex_support != DEX_NOT_SUPPORT &&
-					i > best_video)
-				best_video = i;
-		}
-
-		if (best_video >= 0) {
-			displayport_info("EDID: fallback best video %s -> %s\n",
-					supported_videos[hdev->best_video].name,
-					supported_videos[best_video].name);
-			hdev->best_video = best_video;
-			preferred_preset = supported_videos[hdev->best_video].dv_timings;
-		}
-	}
+	edid_check_detail_timing_desc1(&specs, modedb_len, edid);
 
 	/* No supported preset found, use default */
 	if (forced_resolution >= 0) {
@@ -999,7 +950,7 @@ out:
 	if (block_cnt == -EPROTO)
 		edid_misc = FB_MISC_HDMI;
 
-	if (!hdev->do_unit_test && !edid_test && edid)
+	if (!hdev->do_unit_test && !edid_test)
 		kfree(edid);
 
 	return block_cnt;

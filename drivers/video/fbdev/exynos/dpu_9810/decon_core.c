@@ -41,12 +41,8 @@
 #include <linux/sec_debug.h>
 #endif
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/exynos_dpu.h>
-
 #include "decon.h"
 #include "dsim.h"
-#include "dsu.h"
 #include "./panels/lcd_ctrl.h"
 #include "../../../../dma-buf/sync_debug.h"
 #include "dpp.h"
@@ -58,8 +54,6 @@ int dpu_bts_log_level = 6;
 module_param(dpu_bts_log_level, int, 0644);
 int win_update_log_level = 6;
 module_param(win_update_log_level, int, 0644);
-int dpu_mres_log_level = 6;
-module_param(dpu_mres_log_level, int, 0644);
 int decon_systrace_enable;
 static int decon2_event_count;
 
@@ -89,20 +83,29 @@ void __iomem *regs_dphy_clk_2;
 
 void tracing_mark_write(struct decon_device *decon, char id, char *str1, int value)
 {
+	char buf[DECON_TRACE_BUF_SIZE] = {0,};
+
 	if (!decon->systrace.pid)
 		return;
 
 	switch (id) {
 	case 'B': /* B : Begin */
+		snprintf(buf, DECON_TRACE_BUF_SIZE, "B|%d|%s",
+				decon->systrace.pid, str1);
+		break;
 	case 'E': /* E : End */
+		strcpy(buf, "E");
+		break;
 	case 'C': /* C : Category */
+		snprintf(buf, DECON_TRACE_BUF_SIZE,
+				"C|%d|%s|%d", decon->systrace.pid, str1, value);
 		break;
 	default:
 		decon_err("%s:argument fail\n", __func__);
 		return;
 	}
+	trace_puts(buf);
 
-	trace_decon_systrace(decon->systrace.pid, id, str1, value);
 }
 
 static void decon_dump_using_dpp(struct decon_device *decon)
@@ -1502,13 +1505,10 @@ int decon_check_limitation(struct decon_device *decon, int idx,
 	}
 
 	if ((config->dst.x + config->dst.w > config->dst.f_w) ||
-			(config->dst.y + config->dst.h > config->dst.f_h) ||
-			(config->dst.x + config->dst.w > decon->lcd_info->xres) ||
-			(config->dst.y + config->dst.h > decon->lcd_info->yres)) {
-		decon_err("dst coordinate is out of range(%d %d %d %d %d %d %d %d)\n",
+			(config->dst.y + config->dst.h > config->dst.f_h)) {
+		decon_err("dst coordinate is out of range(%d %d %d %d %d %d)\n",
 				config->dst.x, config->dst.w, config->dst.f_w,
-				config->dst.y, config->dst.h, config->dst.f_h,
-				decon->lcd_info->xres, decon->lcd_info->yres);
+				config->dst.y, config->dst.h, config->dst.f_h);
 		return -EINVAL;
 	}
 
@@ -1810,66 +1810,8 @@ static int __decon_update_regs(struct decon_device *decon, struct decon_reg_data
 #ifdef CONFIG_SUPPORT_DSU
 	set_dsu_config(decon, regs);
 #endif
-
-	/* apply multi-resolution configuration */
-	dpu_set_mres_config(decon, regs);
-
 	/* apply window update configuration to DECON, DSIM and panel */
 	dpu_set_win_update_config(decon, regs);
-
-	/*
-	 * exynos9810: configure DPP before enabling DECON windows.
-	 *
-	 * If DPP validation/programming fails after DECON window registers have
-	 * already been enabled, the display path can briefly point DECON at an
-	 * invalid or unconfigured DMA channel. For the HDMI AFBC failure case this
-	 * leads to VG1/WB SysMMU faults at 0x0. Validate/program the DPP side first
-	 * and only touch DECON window registers after all requested DPPs accepted
-	 * their configuration.
-	 */
-	err_cnt = decon_set_dpp_config(decon, regs);
-	/*
-	 * exynos9810: fail the frame when DPP config fails.
-	 *
-	 * dpp_check_format() can reject invalid configurations, for example AFBC
-	 * submitted to a non-VGF DPP. decon_set_dpp_config() disables the failed
-	 * window and may reduce num_of_window to zero, but returning success here
-	 * leaves userspace believing the frame was accepted while DECON/DPP state is
-	 * inconsistent. That can later fault the display SysMMU.
-	 */
-	if (err_cnt) {
-		decon_err("decon%d: dpp_config failed(err_cnt:%d, num_of_window:%d)\n",
-			decon->id, err_cnt, regs->num_of_window);
-		if (!regs->num_of_window)
-			decon_err("decon%d: num_of_window=0 during dpp_config(err_cnt:%d)\n",
-				decon->id, err_cnt);
-
-		/*
-		 * exynos9810: latch disabled windows after DPP config failure.
-		 *
-		 * decon_set_dpp_config() disables windows whose DPP config was rejected,
-		 * but the normal DECON window-control and shadow-update path is below this
-		 * error return. Without explicitly committing the disabled state here, the
-		 * hardware can keep scanning a stale/invalid VG window and fault the display
-		 * SysMMU at 0x0.
-		 */
-		for (i = 0; i < decon->dt.max_win; i++)
-			decon_reg_set_window_control(decon->id, i, &regs->win_regs[i],
-						regs->win_regs[i].winmap_state);
-
-		decon_reg_all_win_shadow_update_req(decon->id);
-		decon_to_psr_info(decon, &psr);
-		if (decon_reg_start(decon->id, &psr) < 0)
-			decon_err("decon%d: failed to latch disabled windows after dpp_config failure\n",
-				decon->id);
-
-		return -EINVAL;
-	}
-	if (!regs->num_of_window) {
-		decon_err("decon%d: num_of_window=0 during dpp_config(err_cnt:%d)\n",
-			decon->id, err_cnt);
-		return -EINVAL;
-	}
 
 	for (i = 0; i < decon->dt.max_win; i++) {
 		if (regs->is_cursor_win[i]) {
@@ -1884,6 +1826,13 @@ static int __decon_update_regs(struct decon_device *decon, struct decon_reg_data
 		for (j = 0; j < regs->plane_cnt[i]; ++j)
 			decon->win[i]->dma_buf_data[j] = regs->dma_buf_data[i][j];
 		decon->win[i]->plane_cnt = regs->plane_cnt[i];
+	}
+
+	err_cnt = decon_set_dpp_config(decon, regs);
+	if (!regs->num_of_window) {
+		decon_err("decon%d: num_of_window=0 during dpp_config(err_cnt:%d)\n",
+			decon->id, err_cnt);
+		return 0;
 	}
 
 #if defined(CONFIG_EXYNOS_CONTENT_PATH_PROTECTION)
@@ -2235,20 +2184,6 @@ video_emul_check_done:
 			goto end;
 		}
 	} else {
-		if (regs->dpp_config[DECON_WIN_UPDATE_IDX].state ==
-				DECON_WIN_STATE_MRESOL) {
-			if (regs->mres_update) {
-				if ((decon->dt.psr_mode == DECON_MIPI_COMMAND_MODE) &&
-					(decon->dt.trig_mode == DECON_HW_TRIG)) {
-					if (decon_reg_wait_for_update_timeout(decon->id,
-								SHADOW_UPDATE_TIMEOUT) < 0)
-						decon_err("%s(%d) shadow update timeout\n", __func__, __LINE__);
-					decon_reg_set_trigger(decon->id, &psr, DECON_TRIG_DISABLE);
-				}
-				dpu_set_mres_config(decon, regs);
-			}
-		}
-
 		__decon_update_clear(decon, regs);
 		decon_wait_for_vsync(decon, VSYNC_TIMEOUT_MSEC);
 		goto end;
@@ -2390,24 +2325,21 @@ static void decon_update_regs_handler(struct kthread_work *work)
 	mutex_unlock(&decon->up.lock);
 
 	list_for_each_entry_safe(data, next, &saved_list, list) {
-		decon_systrace(decon, 'C', "update_regs_list_cnt", decon->update_regs_list_cnt);
 		decon_systrace(decon, 'C', "update_regs_list", 1);
 
 		if (decon->dt.out_type == DECON_OUT_DP)
 			decon2_event_count--;
 		decon_set_cursor_reset(decon, data);
 		decon_update_regs(decon, data);
-		decon->update_regs_list_cnt--;
-		decon_systrace(decon, 'C', "update_regs_list_cnt", decon->update_regs_list_cnt);
 #if defined(CONFIG_EXYNOS_COMMON_PANEL)
 		memcpy(&decon->last_regs, data, sizeof(struct decon_reg_data));
 #endif
 		decon_hiber_unblock(decon);
 		if (!decon->up_list_saved) {
 			list_del(&data->list);
-			decon_systrace(decon, 'C', "update_regs_list", 0);
+			decon_systrace(decon, 'C',
+							"update_regs_list", 0);
 			kfree(data);
-			atomic_dec(&decon->up.remaining_frame);
 		}
 	}
 }
@@ -2663,10 +2595,6 @@ static int decon_set_win_config(struct decon_device *decon,
 	if (decon->dt.out_type == DECON_OUT_DP)
 		decon2_event_count++;
 	list_add_tail(&regs->list, &decon->up.list);
-	decon->update_regs_list_cnt++;
-	atomic_inc(&decon->up.remaining_frame);
-	win_data->extra.remained_frames =
-		atomic_read(&decon->up.remaining_frame);
 	mutex_unlock(&decon->up.lock);
 	kthread_queue_work(&decon->up.worker, &decon->up.work);
 
@@ -2698,7 +2626,6 @@ err_prepare:
 		put_unused_fd(win_data->retire_fence);
 	}
 	win_data->retire_fence = -1;
-	win_data->extra.remained_frames = -1;
 
 	for (i = 0; i < decon->dt.max_win; i++)
 		for (j = 0; j < regs->plane_cnt[i]; ++j)
@@ -2763,120 +2690,6 @@ static int decon_get_hdr_capa_info(struct decon_device *decon,
 
 }
 
-static int decon_get_color_mode(struct decon_device *decon,
-		struct decon_color_mode_info *color_mode)
-{
-	int ret = 0;
-
-	decon_dbg("%s +\n", __func__);
-	mutex_lock(&decon->lock);
-
-	switch (color_mode->index) {
-	case 0:
-		color_mode->color_mode = HAL_COLOR_MODE_NATIVE;
-		break;
-
-	/* TODO: add supporting color mode if necessary */
-
-	default:
-		decon_err("%s: queried color mode index is wrong!(%d)\n",
-			__func__, color_mode->index);
-		ret = -EINVAL;
-		break;
-	}
-
-	mutex_unlock(&decon->lock);
-	decon_dbg("%s -\n", __func__);
-
-	return ret;
-}
-
-static int decon_set_color_mode(struct decon_device *decon,
-		struct decon_color_mode_info *color_mode)
-{
-	int ret = 0;
-
-	decon_dbg("%s +\n", __func__);
-	mutex_lock(&decon->lock);
-
-	switch (color_mode->index) {
-	case 0:
-		color_mode->color_mode = HAL_COLOR_MODE_NATIVE;
-		break;
-
-	/* TODO: add supporting color mode if necessary */
-
-	default:
-		decon_err("%s: color mode index is out of range!(%d)\n",
-			__func__, color_mode->index);
-		ret = -EINVAL;
-		break;
-	}
-
-	mutex_unlock(&decon->lock);
-	decon_dbg("%s -\n", __func__);
-
-	return ret;
-}
-
-static int decon_get_vsync_change_timeline(struct decon_device *decon,
-		struct vsync_applied_time_data *vsync_time)
-{
-	struct decon_lcd *lcd_info = decon->lcd_info;
-	u64 last_vsync, cur_nsec, next_vsync;
-	u64 vsync_period;
-	u32 frames;
-	int ret = 0;
-
-	decon_dbg("%s +\n", __func__);
-	mutex_lock(&decon->lock);
-
-	if (!decon->mres_enabled) {
-		decon_warn("MRES is not enabled\n");
-		/* EPERM(1) : Operation not permitted */
-		ret = -EPERM;
-		goto end;
-	}
-
-	if (vsync_time->config >= lcd_info->dt_lcd_mres.mres_number){
-		decon_err("requested configId(%d) is out of range!\n", vsync_time->config);
-		ret = -EINVAL;
-		goto end;
-	}
-
-	if (vsync_time->config == lcd_info->mres_mode - DSU_MODE_1) {
-		decon_warn("requested configId is same as current one\n");
-		ret = -EINVAL;
-		goto end;
-	}
-
-	vsync_period = 1000000000UL / lcd_info->fps;
-
-	last_vsync = ktime_to_ns(decon->vsync.timestamp);
-	cur_nsec = ktime_to_ns(ktime_get());
-
-	if (cur_nsec <= last_vsync)
-		next_vsync = last_vsync;
-	else {
-		next_vsync = last_vsync +
-				(cur_nsec - last_vsync) / vsync_period * vsync_period;
-	}
-
-	frames = atomic_read(&decon->up.remaining_frame);
-	if (frames > 0)
-		frames--;
-	vsync_time->time = max(cur_nsec, next_vsync + frames * vsync_period);
-
-	decon_dbg("EXYNOS_GET_VSYNC_CHANGE_TIMELINE: config(%d) => time(%llu)\n",
-				vsync_time->config, vsync_time->time);
-
-end:
-	mutex_unlock(&decon->lock);
-	decon_dbg("%s -\n", __func__);
-
-	return ret;
-}
-
 static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 			unsigned long arg)
 {
@@ -2892,11 +2705,6 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 	struct decon_user_window user_window;	/* cursor async */
 	struct decon_win_config_data __user *argp;
 	struct decon_disp_info __user *argp_info;
-	struct decon_edid_data edid_data;
-	struct decon_display_mode dm_info;
-	struct decon_reg_data decon_regs;
-	struct decon_color_mode_info cm_info;
-	struct vsync_applied_time_data vsync_time;
 	int ret = 0;
 	u32 crtc;
 	bool active;
@@ -2905,9 +2713,6 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 #ifdef CONFIG_SUPPORT_DOZE
 	u32 pwr_mode;
 #endif
-	u32 cm_num;
-	u32 dm_num;
-	u32 actual_mres_mode;
 
 	decon_hiber_block_exit(decon);
 	switch (cmd) {
@@ -3140,7 +2945,7 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 				break;
 			}
 		} else {
-			decon_dbg("DECON:DBG:%s:decon%d ignore unsupported pwr_state %d\n",
+			decon_warn("DECON:WARN:%s:decon%d invalid pwr_state %d\n",
 					__func__, decon->id, pwr_mode);
 		}
 		break;
@@ -3164,157 +2969,6 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 			ret = -EPERM;
 		}
 		break;
-
-	case EXYNOS_GET_COLOR_MODE_NUM:
-		cm_num = HAL_COLOR_MODE_NUM_MAX;
-		if (copy_to_user((u32 __user *)arg, &cm_num, sizeof(u32)))
-			ret = -EFAULT;
-		break;
-
-	case EXYNOS_GET_COLOR_MODE:
-		if (copy_from_user(&cm_info,
-				   (struct decon_color_mode_info __user *)arg,
-				   sizeof(struct decon_color_mode_info))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		ret = decon_get_color_mode(decon, &cm_info);
-		if (ret)
-			break;
-
-		if (copy_to_user((struct decon_color_mode_info __user *)arg,
-				&cm_info,
-				sizeof(struct decon_color_mode_info))) {
-			ret = -EFAULT;
-			break;
-		}
-		break;
-
-	case EXYNOS_SET_COLOR_MODE:
-		if (get_user(cm_info.index, (int __user *)arg)) {
-			ret = -EFAULT;
-			break;
-		}
-
-		ret = decon_set_color_mode(decon, &cm_info);
-		if (ret)
-			break;
-
-		/* ADD additional action if necessary */
-
-		break;
-
-	case EXYNOS_GET_EDID:
-		if (decon->dt.out_type == DECON_OUT_DP) {
-#if defined(CONFIG_EXYNOS_DISPLAYPORT)
-			ret = decon_displayport_get_edid(decon, &edid_data);
-
-			if (copy_to_user((struct decon_edid_data __user *)arg,
-					&edid_data, sizeof(edid_data))) {
-				ret = -EFAULT;
-				break;
-			}
-#endif
-		} else if (decon->dt.out_type == DECON_OUT_DSI) {
-			memset(&edid_data, 0, sizeof(struct decon_edid_data));
-			decon_get_edid(decon, &edid_data);
-			if (copy_to_user((struct decon_edid_data __user *)arg,
-					&edid_data, sizeof(edid_data))) {
-				ret = -EFAULT;
-				break;
-			}
-		} else {
-			ret = -EFAULT;
-		}
-		break;
-
-	case EXYNOS_GET_DISPLAY_MODE_NUM:
-		dm_num = mres_info->mres_number;
-		if (copy_to_user((u32 __user *)arg, &dm_num, sizeof(u32)))
-                        ret = -EFAULT;
-
-		break;
-
-	case EXYNOS_GET_DISPLAY_MODE:
-		if (copy_from_user(&dm_info,
-				   (struct decon_display_mode __user *)arg,
-				   sizeof(struct decon_display_mode))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		if (dm_info.index < mres_info->mres_number) {
-			dm_info.width = mres_info->res_info[dm_info.index].width;
-			dm_info.height = mres_info->res_info[dm_info.index].height;
-			dm_info.mm_width = lcd_info->width;
-			dm_info.mm_height = lcd_info->height;
-			dm_info.fps = lcd_info->fps;
-			dm_info.group = dm_info.index;
-		} else {
-			ret = -EINVAL;
-			break;
-		}
-
-		if (copy_to_user((struct decon_display_mode __user *)arg,
-				&dm_info,
-				sizeof(struct decon_display_mode))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		break;
-
-	case EXYNOS_SET_DISPLAY_MODE:
-		if (copy_from_user(&dm_info,
-				   (struct decon_display_mode __user *)arg,
-				   sizeof(struct decon_display_mode))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		if (dm_info.index < mres_info->mres_number) {
-			if (!IS_DECON_OFF_STATE(decon)) {
-				memset(&decon_regs, 0, sizeof(struct decon_reg_data));
-				decon_regs.mres_update = true;
-				decon_regs.lcd_width = mres_info->res_info[dm_info.index].width;
-				decon_regs.lcd_height = mres_info->res_info[dm_info.index].height;
-				decon_regs.mres_idx = dm_info.index;
-				dpu_set_mres_config(decon, &decon_regs);
-			}
-		} else {
-			ret = -EINVAL;
-			break;
-		}
-
-		break;
-
-	case EXYNOS_GET_DISPLAY_CURRENT_MODE:
-		actual_mres_mode = lcd_info->mres_mode - DSU_MODE_1;
-
-		if (copy_to_user((u32 __user *)arg, &actual_mres_mode, sizeof(u32)))
-			ret = -EFAULT;
-		break;
-
-	case EXYNOS_GET_VSYNC_CHANGE_TIMELINE:
-		if (copy_from_user(&vsync_time,
-				   (struct vsync_applied_time_data __user *)arg,
-				   sizeof(vsync_time))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		ret = decon_get_vsync_change_timeline(decon, &vsync_time);
-		if (ret)
-			break;
-
-		if (copy_to_user((struct vsync_applied_time_data __user *)arg,
-					&vsync_time, sizeof(vsync_time))) {
-			ret = -EFAULT;
-			break;
-		}
-		break;
-
 	default:
 		decon_err("DECON:ERR:%s:invalid cmd:0x%x(dir:%d, type:%c, nr:%d, sz:%d)\n",
 				__func__, cmd, _IOC_DIR(cmd), (char)_IOC_TYPE(cmd),
@@ -3525,8 +3179,6 @@ static int decon_register_subdevs(struct decon_device *decon)
 	else if (decon->dt.out_type == DECON_OUT_DP)
 		ret = decon_displayport_get_out_sd(decon);
 #endif
-	else
-		ret = -ENODEV;
 
 	return ret;
 }
@@ -3922,6 +3574,35 @@ static void decon_parse_dt(struct decon_device *decon)
 
 }
 
+static int decon_get_disp_ss_addr(struct decon_device *decon)
+{
+	if (of_have_populated_dt()) {
+		struct device_node *nd;
+#if defined(CONFIG_SOC_EXYNOS9810)
+		nd = of_find_compatible_node(NULL, NULL,
+				"samsung,exynos9-disp_ss");
+#else
+		nd = of_find_compatible_node(NULL, NULL,
+				"samsung,exynos8-disp_ss");
+#endif
+		if (!nd) {
+			decon_err("failed find compatible node(sysreg-disp)");
+			return -ENODEV;
+		}
+
+		decon->res.ss_regs = of_iomap(nd, 0);
+		if (!decon->res.ss_regs) {
+			decon_err("Failed to get sysreg-disp address.");
+			return -ENOMEM;
+		}
+	} else {
+		decon_err("failed have populated device tree");
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static int decon_init_resources(struct decon_device *decon,
 		struct platform_device *pdev, char *name)
 {
@@ -3957,11 +3638,10 @@ static int decon_init_resources(struct decon_device *decon,
 	else
 		decon_err("not supported output type(%d)\n", decon->dt.out_type);
 
-	decon->res.ss_regs = dpu_get_sysreg_addr();
-	if (IS_ERR_OR_NULL(decon->res.ss_regs)) {
-		decon_err("failed to get sysreg addr\n");
+	/* mapping SYSTEM registers */
+	ret = decon_get_disp_ss_addr(decon);
+	if (ret)
 		goto err;
-	}
 
 #if defined(CONFIG_ION_EXYNOS)
 	decon->ion_client = exynos_ion_client_create(name);
@@ -3994,7 +3674,6 @@ static int decon_create_update_thread(struct decon_device *decon, char *name)
 	INIT_LIST_HEAD(&decon->up.list);
 	INIT_LIST_HEAD(&decon->up.saved_list);
 	decon->up_list_saved = false;
-	atomic_set(&decon->up.remaining_frame, 0);
 	kthread_init_worker(&decon->up.worker);
 	decon->up.thread = kthread_run_perf_critical(kthread_worker_fn,
 			&decon->up.worker, name);
@@ -4180,8 +3859,8 @@ static int decon_initial_display(struct decon_device *decon, bool is_colormap)
 	}
 #endif
 
-	decon_reg_start(decon->id, &psr);
 	call_panel_ops(dsim, displayon, dsim);
+	decon_reg_start(decon->id, &psr);
 	decon_wait_for_vsync(decon, VSYNC_TIMEOUT_MSEC);
 	if (decon_reg_wait_update_done_and_mask(decon->id, &psr,
 				SHADOW_UPDATE_TIMEOUT) < 0)
@@ -4239,7 +3918,7 @@ static int decon_probe(struct platform_device *pdev)
 	decon_create_timeline(decon, device_name);
 
 	/* systrace */
-	decon_systrace_enable = 0;
+	decon_systrace_enable = 1;
 	decon->systrace.pid = 0;
 
 	ret = decon_init_resources(decon, pdev, device_name);
