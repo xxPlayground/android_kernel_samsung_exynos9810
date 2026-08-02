@@ -773,6 +773,26 @@ DISABLE_LTO	+= $(DISABLE_CFI)
 export DISABLE_CFI
 endif
 
+KBUILD_CFLAGS	+= -mllvm -aggressive-ext-opt \
+           -mllvm -enable-cse-in-irtranslator \
+           -mllvm -enable-cse-in-legalizer \
+           -mllvm -scalar-evolution-use-expensive-range-sharpening \
+           -mllvm -loop-prefetch-writes \
+           -mllvm -enable-interleaved-mem-accesses \
+           -mllvm -enable-masked-interleaved-mem-accesses \
+           -mllvm -enable-gvn-hoist \
+           -mllvm -enable-dfa-jump-thread \
+           -mllvm -allow-unroll-and-jam \
+           -mllvm -enable-loop-distribute \
+           -mllvm -enable-loop-flatten \
+           -mllvm -enable-loopinterchange \
+           -mllvm -enable-unroll-and-jam \
+           -mllvm -unroll-runtime-multi-exit \
+           -mllvm -hot-cold-split=true \
+		   -mllvm -enable-merge-functions \
+		   -mllvm -enable-gvn-sink \
+		   -mllvm -enable-newgvn
+
 ifdef CONFIG_LLVM_MLGO_REGISTER
 # Enable MLGO for register allocation. default, release, development
 KBUILD_CFLAGS	+= -mllvm -regalloc-enable-advisor=release \
