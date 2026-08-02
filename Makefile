@@ -776,7 +776,10 @@ endif
 ifdef CONFIG_LLVM_MLGO_REGISTER
 # Enable MLGO for register allocation. default, release, development
 KBUILD_CFLAGS	+= -mllvm -regalloc-enable-advisor=release \
-		   -mllvm -enable-local-reassign
+		   -mllvm -enable-local-reassign \
+		   -mllvm -enable-ml-inliner=release \
+		   -mllvm -ml-inliner-skip-policy=if-caller-not-cold \
+		   -mllvm -ml-inliner-model-selector=arm64-mixed
 endif
 
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
