@@ -201,7 +201,7 @@ static void f2fs_verify_bio(struct bio *bio)
 		dic = (struct decompress_io_ctx *)page_private(page);
 
 		if (dic) {
-			if (refcount_dec_not_one(&dic->ref))
+			if (atomic_add_unless(&dic->ref, -1, 1))
 				continue;
 			f2fs_verify_pages(dic->rpages,
 						dic->cluster_size);
